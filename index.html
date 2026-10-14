@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Multimodal Search & Face Tagging</title>
+    <style>
+        * { box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+        body { margin: 0; padding: 20px; background-color: #f8f9fa; color: #333; }
+        .container { max-width: 1100px; margin: 0 auto; background: #fff; padding: 25px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+        h1 { margin-top: 0; font-size: 24px; color: #111; }
+        
+        /* Navigation Tabs */
+        .tabs { display: flex; border-bottom: 2px solid #eaeaea; margin-bottom: 20px; gap: 10px; }
+        .tab-btn { background: none; border: none; padding: 10px 20px; font-size: 15px; font-weight: 600; color: #666; cursor: pointer; border-bottom: 3px solid transparent; margin-bottom: -2px; }
+        .tab-btn.active { color: #0066cc; border-bottom-color: #0066cc; }
+        .tab-btn:hover { color: #004499; }
+        
+        /* Tab Contents */
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+        
+        /* Search Tab */
+        .search-box { display: flex; gap: 10px; margin-bottom: 20px; }
+        .search-input { flex: 1; padding: 12px 15px; font-size: 16px; border: 1px solid #ccc; border-radius: 6px; outline: none; }
+        .search-input:focus { border-color: #0066cc; }
+        
+        /* Filter Controls */
+        .filter-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 15px; }
+        .filter-btn { background: #f0f0f0; border: 1px solid #ccc; padding: 6px 14px; border-radius: 20px; cursor: pointer; font-size: 13px; transition: all 0.2s; }
+        .filter-btn.active { background: #0066cc; color: #fff; border-color: #0066cc; }
+        
+        /* File & Search Item List */
+        .results-list, .files-list { display: flex; flex-direction: column; gap: 10px; }
+        .item-card { padding: 12px 15px; border: 1px solid #e0e0e0; border-radius: 6px; display: flex; align-items: center; justify-content: space-between; background: #fafafa; }
+        .item-info { display: flex; flex-direction: column; gap: 4px; overflow: hidden; }
+        .item-title { font-weight: 600; color: #0066cc; text-decoration: none; word-break: break-all; }
+        .item-path { font-size: 12px; color: #777; word-break: break-all; }
+        
+        /* Badges */
+        .badge { font-size: 10px; font-weight: bold; text-transform: uppercase; padding: 3px 8px; border-radius: 4px; display: inline-block; width: fit-content; }
+        .badge.image { background-color: #d4edda; color: #155724; }
+        .badge.pdf { background-color: #f8d7da; color: #721c24; }
+        .badge.text { background-color: #cce5ff; color: #004085; }
+        .badge.document { background-color: #fff3cd; color: #856404; }
+        .badge.other { background-color: #e2e3e5; color: #383d41; }
+
+        /* Face Grid Layout */
+        .face-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 15px; margin-top: 15px; }
+        .face-card { border: 1px solid #e0e0e0; border-radius: 8px; padding: 10px; background: #fff; text-align: center; display: flex; flex-direction: column; align-items: center; }
+        .face-crop { width: 100px; height: 100px; object-fit: cover; border-radius: 50%; border: 2px solid #0066cc; margin-bottom: 10px; }
+        .face-tag-input { width: 100%; padding: 6px; font-size: 12px; border: 1px solid #ccc; border-radius: 4px; margin-top: 6px; text-align: center; }
+        .save-btn { margin-top: 6px; padding: 4px 10px; font-size: 12px; background: #28a745; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
+        .save-btn:hover { background: #218838; }
+
+        .count-text { font-size: 14px; color: #555; margin-bottom: 15px; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>Local Search & Tagging Hub</h1>
+
+    <!-- Tabs Navigation -->
+    <div class="tabs">
+        <button class="tab-btn active" onclick="switchTab('search-tab', event)">Search</button>
+        <button class="tab-btn" onclick="switchTab('files-tab', event)">Indexed Files</button>
+        <button class="tab-btn" onclick="switchTab('faces-tab', event)">Face Tagging</button>
+    </div>
+
+    <!-- Tab 1: Multimodal Search -->
+    <div id="search-tab" class="tab-content active">
+        <div class="search-box">
+            <input type="text" id="query-input" class="search-input" placeholder="Search images, documents, notes..." onkeydown="if(event.key==='Enter') runSearch()">
+            <button class="filter-btn active" style="padding: 0 20px;" onclick="runSearch()">Search</button>
+        </div>
+        <div id="search-results" class="results-list"></div>
+    </div>
+
+    <!-- Tab 2: Indexed Files Dashboard -->
+    <div id="files-tab" class="tab-content">
+        <div class="filter-bar">
+            <strong>Type Filter:</strong>
+            <button class="filter-btn active" onclick="filterFiles('all', event)">All</button>
+            <button class="filter-btn" onclick="filterFiles('image', event)">Images</button>
+            <button class="filter-btn" onclick="filterFiles('pdf', event)">PDFs</button>
+            <button class="filter-btn" onclick="filterFiles('text', event)">Text / Markdown</button>
+            <button class="filter-btn" onclick="filterFiles('document', event)">Docs</button>
+            <button class="filter-btn" onclick="filterFiles('other', event)">Other</button>
+        </div>
+
+        <div id="file-count" class="count-text">Click to load indexed files...</div>
+        <div id="files-list" class="files-list"></div>
+    </div>
+
+    <!-- Tab 3: Face Tagging Grid -->
+    <div id="faces-tab" class="tab-content">
+        <div id="face-count" class="count-text">Loading extracted face crops...</div>
+        <div id="faces-list" class="face-grid"></div>
+    </div>
+</div>
+
+<script>
+    let cachedFiles = [];
+    let cachedFaces = [];
+
+    function switchTab(tabId, evt) {
+        document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+        document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+        
+        document.getElementById(tabId).classList.add('active');
+        if (evt) evt.currentTarget.classList.add('active');
+
+        if (tabId === 'files-tab' && cachedFiles.length === 0) {
+            loadIndexedFiles();
+        } else if (tabId === 'faces-tab' && cachedFaces.length === 0) {
+            loadExtractedFaces();
+        }
+    }
+
+    // --- SEARCH TAB ---
+    async function runSearch() {
+        const query = document.getElementById('query-input').value.trim();
+        if (!query) return;
+
+        const container = document.getElementById('search-results');
+        container.innerHTML = 'Searching...';
+
+        try {
+            const res = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
+            const data = await res.json();
+            
+            container.innerHTML = '';
+            if (!data.results || data.results.length === 0) {
+                container.innerHTML = '<p>No results found.</p>';
+                return;
+            }
+
+            data.results.forEach(item => {
+                const card = document.createElement('div');
+                card.className = 'item-card';
+                card.innerHTML = `
+                    <div class="item-info">
+                        <span class="badge ${item.category}">${item.category}</span>
+                        <a href="file:///${item.path}" class="item-title" target="_blank">${item.name}</a>
+                        <span class="item-path">${item.path}</span>
+                    </div>
+                `;
+                container.appendChild(card);
+            });
+        } catch (err) {
+            container.innerHTML = '<p>Error executing search query.</p>';
+        }
+    }
+
+    // --- INDEXED FILES TAB ---
+    async function loadIndexedFiles() {
+        const countEl = document.getElementById('file-count');
+        countEl.innerText = 'Loading indexed files...';
+
+        try {
+            const res = await fetch('/api/indexed-files');
+            const data = await res.json();
+            cachedFiles = data.files || [];
+            renderFiles(cachedFiles);
+        } catch (err) {
+            countEl.innerText = 'Error loading indexed files.';
+        }
+    }
+
+    function renderFiles(files) {
+        const countEl = document.getElementById('file-count');
+        const container = document.getElementById('files-list');
+        container.innerHTML = '';
+        
+        countEl.innerText = `Showing ${files.length} indexed item(s)`;
+
+        if (files.length === 0) {
+            container.innerHTML = '<p>No files match the selected filter.</p>';
+            return;
+        }
+
+        files.forEach(file => {
+            const card = document.createElement('div');
+            card.className = 'item-card';
+            card.innerHTML = `
+                <div class="item-info">
+                    <span class="badge ${file.category}">${file.category}</span>
+                    <span class="item-title">${file.name}</span>
+                    <span class="item-path">${file.path}</span>
+                </div>
+            `;
+            container.appendChild(card);
+        });
+    }
+
+    function filterFiles(category, evt) {
+        document.querySelectorAll('#files-tab .filter-btn').forEach(btn => btn.classList.remove('active'));
+        if (evt) evt.currentTarget.classList.add('active');
+
+        if (category === 'all') {
+            renderFiles(cachedFiles);
+        } else {
+            const filtered = cachedFiles.filter(f => f.category === category);
+            renderFiles(filtered);
+        }
+    }
+
+    // --- FACE TAGGING TAB ---
+    async function loadExtractedFaces() {
+        const countEl = document.getElementById('face-count');
+        countEl.innerText = 'Loading face crops...';
+
+        try {
+            const res = await fetch('/api/faces');
+            const data = await res.json();
+            cachedFaces = data.faces || [];
+            renderFaces(cachedFaces);
+        } catch (err) {
+            countEl.innerText = 'Error loading face crops.';
+        }
+    }
+
+    function renderFaces(faces) {
+        const countEl = document.getElementById('face-count');
+        const container = document.getElementById('faces-list');
+        container.innerHTML = '';
+
+        countEl.innerText = `Found ${faces.length} detected face(s)`;
+
+        if (faces.length === 0) {
+            container.innerHTML = '<p>No faces extracted yet.</p>';
+            return;
+        }
+
+        faces.forEach(face => {
+            const card = document.createElement('div');
+            card.className = 'face-card';
+            card.innerHTML = `
+                <img src="${face.crop_path}" class="face-crop" alt="Face Crop" onerror="this.src='https://via.placeholder.com/100?text=No+Image'">
+                <small style="font-size:10px; color:#666;">Conf: ${(face.confidence * 100).toFixed(0)}%</small>
+                <input type="text" id="input-${face.id}" class="face-tag-input" value="${face.person_name === 'Unassigned' ? '' : face.person_name}" placeholder="Name / Tag">
+                <button class="save-btn" onclick="saveFaceTag('${face.id}')">Save Tag</button>
+            `;
+            container.appendChild(card);
+        });
+    }
+
+    async function saveFaceTag(faceId) {
+        const input = document.getElementById(`input-${faceId}`);
+        const name = input.value.trim();
+
+        if (!name) return alert('Please enter a name');
+
+        try {
+            const res = await fetch('/api/tag-face', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ face_id: faceId, person_name: name })
+            });
+
+            if (res.ok) {
+                alert('Tag saved successfully!');
+            } else {
+                alert('Failed to save tag.');
+            }
+        } catch (err) {
+            alert('Error connecting to backend.');
+        }
+    }
+</script>
+
+</body>
+</html>

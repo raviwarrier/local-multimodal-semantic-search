@@ -23,7 +23,7 @@ from insightface.app import FaceAnalysis
 # -------------------------------------------------------------------
 # 1. Configuration & Dynamic JSON Loaders
 # -------------------------------------------------------------------
-print(">>> SERVICE LAUNCHING v2.6: Robust Hybrid Search Engine...", flush=True)
+print(">>> SERVICE LAUNCHING v2.7: Robust Hybrid Search Engine...", flush=True)
 
 MODEL_ID = "google/embeddinggemma-2"
 DB_PATH = "./local_search_db"
@@ -34,7 +34,6 @@ FACE_DATA_FILE = Path("./face_clusters.json")
 PATHS_CONFIG_FILE = Path("./config_paths.json")
 FILETYPES_CONFIG_FILE = Path("./config_filetypes.json")
 
-# Schedule interval in seconds (86400 seconds = 24 hours)
 CRAWL_INTERVAL_SECONDS = 86400
 
 DEFAULT_INDEX_PATHS = [
@@ -288,7 +287,6 @@ def start_scheduled_crawler():
                     
                     if scanned_folders % 50 == 0:
                         elapsed_sec = int(time.time() - start_time)
-                        elapsed_str = time.strftime("%H:%M:%S", time.gmtime(elapsed_sec))
                         print(f"Scanning active... Scanned {scanned_folders} folders | Last folder: {root} | New files indexed: {count}", flush=True)
 
                     for file in files:
@@ -354,7 +352,6 @@ def search(q: str = Query(...), limit: int = 50):
     matched_cluster_ids = []
     clean_query = q.lower().strip()
     
-    # 1. Alias Matching (Case-Insensitive)
     for cid, cdata in face_db["clusters"].items():
         clean_aliases = [a.strip().lower() for a in cdata.get("aliases", []) if a and a.strip()]
         for alias in clean_aliases:
@@ -363,17 +360,14 @@ def search(q: str = Query(...), limit: int = 50):
                 pattern = re.compile(re.escape(alias), re.IGNORECASE)
                 clean_query = pattern.sub("", clean_query).strip()
 
-    # 2. Extract person's photo paths
     cluster_photo_paths = set()
     if matched_cluster_ids:
         for img_path, clusters in face_db["image_to_clusters"].items():
             if any(c in clusters for c in matched_cluster_ids):
                 cluster_photo_paths.add(normalize_path(img_path))
 
-    # Strip filler connecting words ("in", "and", "at", "wearing", "with")
     remaining_visual_prompt = re.sub(r'\b(in|and|at|wearing|of|with|a|the)\b', '', clean_query, flags=re.IGNORECASE).strip()
 
-    # 3. DIRECT PERSON MATCH: User typed only the person's name (e.g., "manasa")
     if matched_cluster_ids and not remaining_visual_prompt:
         if not cluster_photo_paths:
             return {"metadatas": [[]]}
@@ -384,11 +378,9 @@ def search(q: str = Query(...), limit: int = 50):
         ]
         return {"metadatas": [direct_results[:limit]]}
 
-    # 4. HYBRID MATCH: Person name + visual description (e.g. "manasa in bikini", "manasa bikini", "manasa and bikini")
     visual_search_term = remaining_visual_prompt if remaining_visual_prompt else "photo"
     query_vec = get_query_embedding(visual_search_term)
 
-    # Query ChromaDB for top 200 vector matches
     results = collection.query(query_embeddings=[query_vec], n_results=200)
 
     filtered_metadatas = []
@@ -401,8 +393,6 @@ def search(q: str = Query(...), limit: int = 50):
             else:
                 filtered_metadatas.append(meta)
 
-    # FALLBACK RECOVERY: If ChromaDB's top 200 global results didn't catch her photo,
-    # force include all of her cluster photos directly as valid matches!
     if matched_cluster_ids and not filtered_metadatas:
         for p in cluster_photo_paths:
             filtered_metadatas.append({
@@ -412,6 +402,53 @@ def search(q: str = Query(...), limit: int = 50):
             })
 
     return {"metadatas": [filtered_metadatas[:limit]]}
+
+@app.get("/api/indexed_files")
+def get_indexed_files():
+    try:
+        count = collection.count()
+        if count == 0:
+            return {"files": []}
+
+        all_records = collection.get(limit=count, include=["metadatas"])
+        metadatas = all_records.get("metadatas", []) or []
+
+        files = []
+        seen_paths = set()
+
+        for meta in metadatas:
+            if not meta or not meta.get("path"):
+                continue
+
+            file_path = meta["path"]
+            if file_path in seen_paths:
+                continue
+
+            seen_paths.add(file_path)
+            ext = Path(file_path).suffix.lower()
+
+            if ext in [".png", ".jpg", ".jpeg"]:
+                category = "image"
+            elif ext == ".pdf":
+                category = "pdf"
+            elif ext in [".txt", ".md"]:
+                category = "text"
+            elif ext in [".docx", ".doc"]:
+                category = "document"
+            else:
+                category = "other"
+
+            files.append({
+                "name": meta.get("filename") or Path(file_path).name,
+                "path": file_path,
+                "category": category
+            })
+
+        files.sort(key=lambda x: x["name"].lower())
+        return {"files": files}
+    except Exception as e:
+        print(f">>> Error fetching indexed files: {e}", flush=True)
+        return {"files": []}
 
 @app.get("/api/clusters")
 def get_clusters():
@@ -465,21 +502,31 @@ def ui():
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Local Multimodal Search v2.6</title>
+        <title>Local Multimodal Search v2.7</title>
         <style>
             body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 20px; background: #f4f4f9; }
-            .container { max-width: 900px; margin: 0 auto; background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+            .container { max-width: 950px; margin: 0 auto; background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
             .nav { display: flex; gap: 10px; margin-bottom: 20px; border-bottom: 2px solid #eee; padding-bottom: 10px; }
             .nav-button { padding: 8px 16px; border: none; background: #e0e0e0; cursor: pointer; border-radius: 4px; font-weight: bold; }
             .nav-button.active { background: #007bff; color: white; }
+            
             input { width: 100%; padding: 12px; font-size: 16px; border: 1px solid #ccc; border-radius: 6px; box-sizing: border-box; }
             .result-item { padding: 12px; border-bottom: 1px solid #eee; text-decoration: none; display: block; color: inherit; }
             .result-item:hover { background: #f8f9fa; }
-            .badge { display: inline-block; padding: 3px 8px; font-size: 12px; font-weight: bold; border-radius: 4px; color: #fff; background: #007bff; }
+            
+            .badge { display: inline-block; padding: 3px 8px; font-size: 11px; font-weight: bold; border-radius: 4px; color: #fff; background: #007bff; text-transform: uppercase; }
             .badge-image { background: #28a745; }
+            .badge-pdf { background: #dc3545; }
+            .badge-text { background: #17a2b8; }
+            .badge-document { background: #ffc107; color: #333; }
+            
             .path { font-size: 13px; color: #666; word-break: break-all; margin-top: 4px; }
             .filename { font-size: 16px; color: #007bff; font-weight: 600; text-decoration: underline; }
             
+            .filter-bar { display: flex; gap: 8px; margin-bottom: 15px; align-items: center; }
+            .filter-btn { padding: 6px 14px; background: #eee; border: 1px solid #ccc; border-radius: 20px; cursor: pointer; font-size: 13px; }
+            .filter-btn.active { background: #007bff; color: #fff; border-color: #007bff; }
+
             .cluster-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 15px; margin-top: 15px; }
             .cluster-card { border: 1px solid #ddd; padding: 12px; border-radius: 8px; text-align: center; background: #fafafa; }
             .crop-container { cursor: pointer; display: inline-block; position: relative; }
@@ -502,16 +549,34 @@ def ui():
     <body>
         <div class="container">
             <div class="nav">
-                <button class="nav-button active" onclick="switchTab('search')">Search</button>
-                <button class="nav-button" onclick="switchTab('tagger')">Face Tagging Gallery</button>
+                <button class="nav-button active" onclick="switchTab('search', event)">Search</button>
+                <button class="nav-button" onclick="switchTab('files', event)">Indexed Files</button>
+                <button class="nav-button" onclick="switchTab('tagger', event)">Face Tagging Gallery</button>
             </div>
 
+            <!-- Tab 1: Search -->
             <div id="search-tab">
                 <h2>Multimodal Search</h2>
                 <input type="text" id="query" placeholder="e.g., '[Person name] at the beach, Me in shorts, [Pet name] at home'..." onkeydown="if(event.key==='Enter') runSearch()">
-                <div id="results"></div>
+                <div id="results" style="margin-top: 15px;"></div>
             </div>
 
+            <!-- Tab 2: Indexed Files -->
+            <div id="files-tab" style="display: none;">
+                <h2>Indexed Documents & Media</h2>
+                <div class="filter-bar">
+                    <strong>Filter:</strong>
+                    <button class="filter-btn active" onclick="filterFiles('all', event)">All</button>
+                    <button class="filter-btn" onclick="filterFiles('image', event)">Images</button>
+                    <button class="filter-btn" onclick="filterFiles('pdf', event)">PDFs</button>
+                    <button class="filter-btn" onclick="filterFiles('text', event)">Text / Markdown</button>
+                    <button class="filter-btn" onclick="filterFiles('document', event)">Docs</button>
+                </div>
+                <p id="file-status-label">Loading indexed files...</p>
+                <div id="indexed-files-list"></div>
+            </div>
+
+            <!-- Tab 3: Face Tagging Gallery -->
             <div id="tagger-tab" style="display: none;">
                 <h2>Face Clusters & Aliases</h2>
                 <p>Click any thumbnail or photo count to inspect all photos in that cluster. Enter <code>name and/or nicknames</code> (comma-separated) to register search tags.</p>
@@ -531,17 +596,23 @@ def ui():
 
         <script>
             let allClusters = [];
+            let allIndexedFiles = [];
 
-            function switchTab(tab) {
+            function switchTab(tab, evt) {
                 document.querySelectorAll('.nav-button').forEach(b => b.classList.remove('active'));
+                evt.target.classList.add('active');
+
+                document.getElementById('search-tab').style.display = 'none';
+                document.getElementById('files-tab').style.display = 'none';
+                document.getElementById('tagger-tab').style.display = 'none';
+
                 if (tab === 'search') {
                     document.getElementById('search-tab').style.display = 'block';
-                    document.getElementById('tagger-tab').style.display = 'none';
-                    event.target.classList.add('active');
-                } else {
-                    document.getElementById('search-tab').style.display = 'none';
+                } else if (tab === 'files') {
+                    document.getElementById('files-tab').style.display = 'block';
+                    loadIndexedFiles();
+                } else if (tab === 'tagger') {
                     document.getElementById('tagger-tab').style.display = 'block';
-                    event.target.classList.add('active');
                     loadClusters();
                 }
             }
@@ -565,6 +636,63 @@ def ui():
                     });
                 }
                 document.getElementById('results').innerHTML = html || '<p>No matching files or photos found.</p>';
+            }
+
+            async function loadIndexedFiles() {
+                const statusLabel = document.getElementById('file-status-label');
+                statusLabel.innerText = 'Loading...';
+                try {
+                    const res = await fetch('/api/indexed_files');
+                    const data = await res.json();
+                    allIndexedFiles = data.files || [];
+                    renderIndexedFiles(allIndexedFiles);
+                } catch (err) {
+                    statusLabel.innerText = 'Failed to load indexed files.';
+                }
+            }
+
+            function renderIndexedFiles(files) {
+                const statusLabel = document.getElementById('file-status-label');
+                const listContainer = document.getElementById('indexed-files-list');
+                listContainer.innerHTML = '';
+
+                statusLabel.innerText = `Showing ${files.length} indexed item(s)`;
+
+                if (files.length === 0) {
+                    listContainer.innerHTML = '<p>No files match the selected filter.</p>';
+                    return;
+                }
+
+                let html = '';
+                files.forEach(item => {
+                    let badgeClass = 'badge';
+                    if (item.category === 'image') badgeClass += ' badge-image';
+                    else if (item.category === 'pdf') badgeClass += ' badge-pdf';
+                    else if (item.category === 'text') badgeClass += ' badge-text';
+                    else if (item.category === 'document') badgeClass += ' badge-document';
+
+                    const fileUrl = '/files/' + encodeURIComponent(item.path);
+
+                    html += `
+                        <a class="result-item" href="${fileUrl}" target="_blank">
+                            <span class="${badgeClass}">${item.category.toUpperCase()}</span>
+                            <span class="filename">${item.name}</span>
+                            <div class="path">${item.path}</div>
+                        </a>`;
+                });
+                listContainer.innerHTML = html;
+            }
+
+            function filterFiles(category, evt) {
+                document.querySelectorAll('.filter-bar .filter-btn').forEach(btn => btn.classList.remove('active'));
+                evt.target.classList.add('active');
+
+                if (category === 'all') {
+                    renderIndexedFiles(allIndexedFiles);
+                } else {
+                    const filtered = allIndexedFiles.filter(f => f.category === category);
+                    renderIndexedFiles(filtered);
+                }
             }
 
             async function loadClusters() {
