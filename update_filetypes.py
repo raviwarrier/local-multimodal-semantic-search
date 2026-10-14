@@ -1,3 +1,4 @@
+import sys
 import json
 from pathlib import Path
 
@@ -17,10 +18,11 @@ def set_filetypes(ext_list):
     print(f">>> Successfully updated {len(clean_exts)} allowed extension(s) in {FILETYPES_FILE.name}")
 
 if __name__ == "__main__":
-    # Specify all supported file extensions
-    allowed_extensions = [
-        ".txt", ".md", ".pdf", ".docx",
-        ".png", ".jpg", ".jpeg"
-    ]
+    # If file extensions are passed as command-line arguments, use them
+    if len(sys.argv) > 1:
+        target_exts = sys.argv[1:]
+    else:
+        # Fallback default list if no arguments are provided
+        target_exts = [".txt", ".md", ".pdf", ".docx", ".png", ".jpg", ".jpeg"]
     
-    set_filetypes(allowed_extensions)
+    set_filetypes(target_exts)

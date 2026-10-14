@@ -1,10 +1,10 @@
-# System Setup & Deployment Instructions (v2.6)
+## System Setup & Deployment Instructions (v2.6)
 
 This document details step-by-step setup, configuration management, and system maintenance guidelines for the local search engine service.
 
 ---
 
-## Architecture Overview
+### Architecture Overview
 
 1. **Ingestion Loop**: Scans configured directories every 24 hours (`CRAWL_INTERVAL_SECONDS = 86400`). Adds new vector embeddings to ChromaDB, extracts faces via ArcFace (`InsightFace`), and prunes deleted records.
 2. **Dynamic Configuration via CLI Helpers**: `update_paths.py` and `update_filetypes.py` safely update `config_paths.json` and `config_filetypes.json`, allowing decoupled path/type management independently from `server.py`.
@@ -16,7 +16,7 @@ This document details step-by-step setup, configuration management, and system m
 
 ---
 
-## Step 1: Directory Setup
+### Step 1: Directory Setup
 
 Create the target system folder structure:
 ```powershell
@@ -26,11 +26,11 @@ mkdir -p C:\Users\raviw\.localsearch\local_search_db
 
 ---
 
-## Step 2: Deploy CLI Helpers & Initialize Configurations
+### Step 2: Deploy CLI Helpers & Initialize Configurations
 
 Create and run the CLI helper scripts to initialize `config_paths.json` and `config_filetypes.json`.
 
-### 1. `update_paths.py`
+#### 1. `update_paths.py`
 Create `update_paths.py` in `C:\Users\raviw\.localsearch\`:
 ```python
 import json
@@ -57,7 +57,7 @@ Run to generate `config_paths.json`:
 python update_paths.py
 ```
 
-### 2. `update_filetypes.py`
+#### 2. `update_filetypes.py`
 Create `update_filetypes.py` in `C:\Users\raviw\.localsearch\`:
 ```python
 import json
@@ -83,7 +83,7 @@ python update_filetypes.py
 
 ---
 
-## Step 3: Persistent Windows Service (NSSM) Setup
+### Step 3: Persistent Windows Service (NSSM) Setup
 
 1. Place `nssm.exe` in `C:\Users\raviw\.localsearch\`.
 2. Open PowerShell as Administrator.
@@ -98,16 +98,16 @@ python update_filetypes.py
 
 ---
 
-## Step 4: Maintenance & Configuration Updates
+### Step 4: Maintenance & Configuration Updates
 
-### Updating Index Paths or Supported File Types
+#### Updating Index Paths or Supported File Types
 To add new drives or file extensions:
 1. Open `update_paths.py` or `update_filetypes.py`.
 2. Modify the target lists in the `if __name__ == "__main__":` block.
 3. Execute the helper script (`python update_paths.py` or `python update_filetypes.py`).
 4. The crawler loop will read the updated JSON configs on its next sweep without requiring a service restart.
 
-### Checking Service Health & Logs
+#### Checking Service Health & Logs
 - Check service status: `.\nssm.exe status LocalSearchService`
 - Restart service after updating `server.py`: `.\nssm.exe restart LocalSearchService`
 - Access Web Interface: Open browser to `http://localhost:8000`
