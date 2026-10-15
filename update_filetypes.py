@@ -1,28 +1,79 @@
-import sys
+import argparse
 import json
 from pathlib import Path
 
-FILETYPES_FILE = Path("./config_filetypes.json")
+CONFIG_FILE = Path("./config_filetypes.json")
 
-def set_filetypes(ext_list):
-    """
-    Normalizes extensions (ensuring lowercase and leading dots) and saves to config_filetypes.json.
-    """
-    clean_exts = sorted(list(set(
-        ext.lower() if ext.startswith(".") else f".{ext.lower()}" 
-        for ext in ext_list if ext.strip()
-    )))
+def load_filetypes():
+    if CONFIG_FILE.exists():
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    return data
+        except Exception as e:
+            print(f"Error loading {CONFIG_FILE}: {e}")
+    return []
+
+def save_filetypes(filetypes):
+    filetypes = sorted(list(set(filetypes)))
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(filetypes, f, indent=2)
+    print(f"Successfully saved {len(filetypes)} extension(s) to {CONFIG_FILE.name}")
+
+def format_ext(ext_str):
+    ext = ext_str.strip().strip('"').strip("'").lower()
+    if not ext.startswith("."):
+        ext = f".{ext}"
+    return ext
+
+def main():
+    parser = argparse.ArgumentParser(description="Manage allowed file extensions in config_filetypes.json")
+    parser.add_argument("--add", "-a", nargs="+", help="One or more file extensions to append")
+    parser.add_argument("--remove", "-r", nargs="+", help="One or more file extensions to remove")
+    parser.add_argument("--list", "-l", action="store_true", help="List all currently allowed file extensions")
     
-    with open(FILETYPES_FILE, "w", encoding="utf-8") as f:
-        json.dump(clean_exts, f, indent=2)
-    print(f">>> Successfully updated {len(clean_exts)} allowed extension(s) in {FILETYPES_FILE.name}")
+    args = parser.parse_args()
+
+    existing_types = set(load_filetypes())
+
+    if args.list:
+        sorted_exts = sorted(list(existing_types))
+        print(f"\n--- Allowed File Extensions ({len(sorted_exts)}) ---")
+        if not sorted_exts:
+            print("  (No extensions configured)")
+        else:
+            print("  " + ", ".join(sorted_exts))
+        print("----------------------------------------------\n")
+        if not args.add and not args.remove:
+            return
+
+    modified = False
+
+    # Process removals
+    if args.remove:
+        for r_ext in args.remove:
+            clean_r = format_ext(r_ext)
+            if clean_r in existing_types:
+                existing_types.remove(clean_r)
+                print(f"- Removed extension: {clean_r}")
+                modified = True
+            else:
+                print(f"? Extension not found (skipped removal): {clean_r}")
+
+    # Process additions (appends to existing)
+    if args.add:
+        for a_ext in args.add:
+            clean_a = format_ext(a_ext)
+            if clean_a not in existing_types:
+                existing_types.add(clean_a)
+                print(f"+ Appended extension: {clean_a}")
+                modified = True
+            else:
+                print(f"= Extension already exists (skipped): {clean_a}")
+
+    if modified:
+        save_filetypes(list(existing_types))
 
 if __name__ == "__main__":
-    # If file extensions are passed as command-line arguments, use them
-    if len(sys.argv) > 1:
-        target_exts = sys.argv[1:]
-    else:
-        # Fallback default list if no arguments are provided
-        target_exts = [".txt", ".md", ".pdf", ".docx", ".png", ".jpg", ".jpeg"]
-    
-    set_filetypes(target_exts)
+    main()

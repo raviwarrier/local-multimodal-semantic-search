@@ -1,0 +1,24 @@
+# Base Deep Learning Engine
+--find-links https://download.pytorch.org/whl/cu121
+torch==2.5.1
+torchvision==0.20.1
+torchaudio==2.5.1
+
+# Core Libraries with safe ranges
+transformers>=4.44.0,<5.0.0
+timm>=1.0.0
+einops>=0.8.0
+accelerate>=1.0.0
+pillow>=10.0.0
+
+# Computer Vision & Vector DB
+insightface==0.7.3
+onnxruntime-gpu>=1.18.0
+opencv-python>=4.10.0
+chromadb>=0.5.0
+
+# Document Parsing & Web Engine
+pypdf>=5.0.0
+python-docx>=1.1.0
+fastapi>=0.115.0
+uvicorn>=0.30.0

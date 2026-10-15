@@ -60,3 +60,9 @@ nssm.exe
 # OS generated files
 .DS_Store
 Thumbs.db
+
+# Old Code
+old_code/
+
+#NSSM
+nssm.exe

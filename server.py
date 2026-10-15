@@ -4,13 +4,23 @@ import time
 import json
 import base64
 import re
+import gc
 from pathlib import Path
 import threading
 import torch
+
+# --- PyTorch < 2.6 Compatibility Patch ---
+if not hasattr(torch, "accelerator"):
+    class DummyAccelerator:
+        @staticmethod
+        def current_accelerator():
+            return None
+    torch.accelerator = DummyAccelerator()
+
 import cv2
 import numpy as np
 from PIL import Image
-from transformers import AutoProcessor, AutoModel
+from transformers import AutoTokenizer, AutoModel
 import chromadb
 from pypdf import PdfReader
 from docx import Document
@@ -23,7 +33,7 @@ from insightface.app import FaceAnalysis
 # -------------------------------------------------------------------
 # 1. Configuration & Dynamic JSON Loaders
 # -------------------------------------------------------------------
-print(">>> SERVICE LAUNCHING v2.7: Robust Hybrid Search Engine...", flush=True)
+print(">>> SERVICE LAUNCHING v3.4: Category-Filtered Multimodal Search Engine...", flush=True)
 
 MODEL_ID = "google/embeddinggemma-2"
 DB_PATH = "./local_search_db"
@@ -41,7 +51,10 @@ DEFAULT_INDEX_PATHS = [
     r"B:\\",  # Bookshelf SMB Drive
     r"D:\\",  # Documents SMB Drive
 ]
-DEFAULT_ALLOWED_EXTENSIONS = {".txt", ".md", ".pdf", ".docx", ".png", ".jpg", ".jpeg"}
+DEFAULT_ALLOWED_EXTENSIONS = {
+    ".txt", ".md", ".pdf", ".docx", ".png", ".jpg", ".jpeg",
+    ".mp4", ".mkv", ".mov", ".avi", ".ts", ".epub", ".mobi", ".pptx", ".xlsx"
+}
 
 def normalize_path(path_str: str) -> str:
     """Standardize Windows path format for consistent dictionary lookups."""
@@ -78,9 +91,8 @@ SKIP_DIRS = {".git", ".venv", "$recycle.bin", "appdata", "rwpi_backups", "node_m
 device = "cuda" if torch.cuda.is_available() else "cpu"
 torch_dtype = torch.bfloat16 if (device == "cuda" and torch.cuda.is_bf16_supported()) else torch.float32
 
-print(f">>> Loading {MODEL_ID} on {device} ({torch_dtype})...", flush=True)
-
-processor = AutoProcessor.from_pretrained(MODEL_ID)
+print(f">>> Loading Embedding Model {MODEL_ID} on {device} ({torch_dtype})...", flush=True)
+processor = AutoTokenizer.from_pretrained(MODEL_ID)
 model = AutoModel.from_pretrained(MODEL_ID, torch_dtype=torch_dtype).to(device)
 
 print(">>> Initializing InsightFace ArcFace model...", flush=True)
@@ -178,9 +190,9 @@ def match_or_create_cluster(face_embedding, cropped_img, file_path):
     save_face_db()
     return cluster_id
 
-def process_image_faces(file_path):
+def process_image_faces(file_path, frame_img=None):
     try:
-        img = cv2.imread(file_path)
+        img = frame_img if frame_img is not None else cv2.imread(file_path)
         if img is None:
             return
         faces = face_app.get(img)
@@ -194,13 +206,36 @@ def process_image_faces(file_path):
     except Exception as e:
         print(f">>> Face processing error on {file_path}: {e}", flush=True)
 
+def process_video_faces_and_metadata(file_path, num_samples=5):
+    """Samples video keyframes to perform face detection across video files."""
+    try:
+        cap = cv2.VideoCapture(file_path)
+        if not cap.isOpened():
+            return
+            
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if total_frames <= 0:
+            cap.release()
+            return
+
+        sample_indices = np.linspace(0, total_frames - 1, num_samples, dtype=int)
+        for frame_idx in sample_indices:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+            ret, frame = cap.read()
+            if ret and frame is not None:
+                process_image_faces(file_path, frame_img=frame)
+                
+        cap.release()
+    except Exception as e:
+        print(f">>> Video processing error on {file_path}: {e}", flush=True)
+
 # -------------------------------------------------------------------
-# 3. Text Extraction & Multimodal Embeddings
+# 3. Document & Video Ingestion Routine
 # -------------------------------------------------------------------
 def extract_text(file_path: str) -> str:
     ext = Path(file_path).suffix.lower()
     try:
-        if os.path.getsize(file_path) > 10 * 1024 * 1024:
+        if os.path.getsize(file_path) > 10 * 1024 * 1024 and ext in [".txt", ".md", ".pdf", ".docx"]:
             return ""
             
         if ext in [".txt", ".md"]:
@@ -221,22 +256,27 @@ def extract_text(file_path: str) -> str:
 
 def get_file_embedding(file_path: str):
     ext = Path(file_path).suffix.lower()
-    
+    title = Path(file_path).name
+
     if ext in [".png", ".jpg", ".jpeg"]:
         try:
-            image = Image.open(file_path).convert("RGB")
-            inputs = processor(images=image, return_tensors="pt").to(device)
             process_image_faces(file_path)
+            formatted_text = f"title: {title} | photo image file"
         except Exception as e:
+            print(f">>> Skipping unreadable/corrupt image {file_path}: {e}", flush=True)
+            return None
+    elif ext in [".mp4", ".mkv", ".mov", ".avi", ".ts"]:
+        try:
+            process_video_faces_and_metadata(file_path)
+            formatted_text = f"title: {title} | video media file"
+        except Exception as e:
+            print(f">>> Skipping unreadable video {file_path}: {e}", flush=True)
             return None
     else:
         text_content = extract_text(file_path)
-        if not text_content.strip():
-            return None
-            
-        title = Path(file_path).name
-        formatted_text = f"title: {title} | text: {text_content}"
-        inputs = processor(text=formatted_text, return_tensors="pt", padding=True, truncation=True).to(device)
+        formatted_text = f"title: {title} | text: {text_content}" if text_content.strip() else f"title: {title} | document file"
+
+    inputs = processor(text=formatted_text, return_tensors="pt", padding=True, truncation=True).to(device)
 
     with torch.no_grad():
         outputs = model(**inputs)
@@ -287,7 +327,9 @@ def start_scheduled_crawler():
                     
                     if scanned_folders % 50 == 0:
                         elapsed_sec = int(time.time() - start_time)
-                        print(f"Scanning active... Scanned {scanned_folders} folders | Last folder: {root} | New files indexed: {count}", flush=True)
+                        formatted_duration = time.strftime("%H:%M", time.gmtime(elapsed_sec))
+                        current_timestamp = time.strftime("[%H:%M]")
+                        print(f"{current_timestamp} Scanning active... Duration: {formatted_duration} | Scanned {scanned_folders} folders | Last folder: {root} | New files indexed: {count}", flush=True)
 
                     for file in files:
                         ext = Path(file).suffix.lower()
@@ -301,13 +343,14 @@ def start_scheduled_crawler():
                                 
                             vec = get_file_embedding(full_path)
                             if vec:
+                                media_type = "image" if ext in [".png", ".jpg", ".jpeg"] else ("video" if ext in [".mp4", ".mkv", ".mov", ".avi", ".ts"] else "text")
                                 collection.add(
                                     ids=[norm_path],
                                     embeddings=[vec],
                                     metadatas=[{
                                         "path": full_path, 
                                         "filename": file, 
-                                        "type": "image" if ext in [".png", ".jpg", ".jpeg"] else "text"
+                                        "type": media_type
                                     }]
                                 )
                                 count += 1
@@ -332,7 +375,8 @@ def start_scheduled_crawler():
                 save_face_db()
 
             total_elapsed = time.strftime("%H:%M:%S", time.gmtime(int(time.time() - start_time)))
-            print(f">>> CRAWLER SWEEP COMPLETE. Indexed {count} new files, pruned {len(deleted_ids)} deleted files across {scanned_folders} folders in {total_elapsed}.", flush=True)
+            completion_timestamp = time.strftime("[%H:%M]")
+            print(f"{completion_timestamp} >>> CRAWLER SWEEP COMPLETE. Indexed {count} new files, pruned {len(deleted_ids)} deleted files across {scanned_folders} folders in {total_elapsed}.", flush=True)
             
         except Exception as e:
             print(f">>> Error during crawler loop execution: {e}", flush=True)
@@ -347,8 +391,18 @@ app = FastAPI()
 def startup_event():
     threading.Thread(target=start_scheduled_crawler, daemon=True).start()
 
+def get_category_type(path_str: str) -> str:
+    ext = Path(path_str).suffix.lower()
+    if ext in [".png", ".jpg", ".jpeg"]:
+        return "image"
+    elif ext in [".mp4", ".mkv", ".mov", ".avi", ".ts"]:
+        return "video"
+    elif ext in [".pdf", ".docx", ".doc", ".txt", ".md", ".pptx", ".xlsx", ".epub", ".mobi"]:
+        return "text"
+    return "other"
+
 @app.get("/api/search")
-def search(q: str = Query(...), limit: int = 50):
+def search(q: str = Query(...), limit: int = 50, category: str = "all"):
     matched_cluster_ids = []
     clean_query = q.lower().strip()
     
@@ -364,29 +418,42 @@ def search(q: str = Query(...), limit: int = 50):
     if matched_cluster_ids:
         for img_path, clusters in face_db["image_to_clusters"].items():
             if any(c in clusters for c in matched_cluster_ids):
-                cluster_photo_paths.add(normalize_path(img_path))
+                norm_p = normalize_path(img_path)
+                if category == "all" or get_category_type(norm_p) == category:
+                    cluster_photo_paths.add(norm_p)
 
-    remaining_visual_prompt = re.sub(r'\b(in|and|at|wearing|of|with|a|the)\b', '', clean_query, flags=re.IGNORECASE).strip()
+    remaining_visual_prompt = clean_query.strip()
 
     if matched_cluster_ids and not remaining_visual_prompt:
         if not cluster_photo_paths:
             return {"metadatas": [[]]}
             
         direct_results = [
-            {"path": p, "filename": Path(p).name, "type": "image"} 
+            {"path": p, "filename": Path(p).name, "type": get_category_type(p)} 
             for p in cluster_photo_paths
         ]
-        return {"metadatas": [direct_results[:limit]]}
+        return {"metadatas": [direct_results[:limit] if limit > 0 else direct_results]}
 
-    visual_search_term = remaining_visual_prompt if remaining_visual_prompt else "photo"
+    visual_search_term = remaining_visual_prompt if remaining_visual_prompt else "file"
     query_vec = get_query_embedding(visual_search_term)
 
-    results = collection.query(query_embeddings=[query_vec], n_results=200)
+    # Determine dynamic query count
+    fetch_n = collection.count() if limit == 0 else max(limit * 3, 200)
+    fetch_n = min(fetch_n, collection.count()) if collection.count() > 0 else 10
+    
+    results = collection.query(query_embeddings=[query_vec], n_results=fetch_n)
 
     filtered_metadatas = []
     if results.get("metadatas") and results["metadatas"][0]:
         for meta in results["metadatas"][0]:
             p_norm = normalize_path(meta["path"])
+            item_type = meta.get("type", get_category_type(p_norm))
+            
+            # Filter by Category
+            if category != "all" and item_type != category:
+                continue
+
+            # Filter by Face Match if person mentioned
             if matched_cluster_ids:
                 if p_norm in cluster_photo_paths:
                     filtered_metadatas.append(meta)
@@ -398,10 +465,11 @@ def search(q: str = Query(...), limit: int = 50):
             filtered_metadatas.append({
                 "path": p,
                 "filename": Path(p).name,
-                "type": "image"
+                "type": get_category_type(p)
             })
 
-    return {"metadatas": [filtered_metadatas[:limit]]}
+    output = filtered_metadatas[:limit] if limit > 0 else filtered_metadatas
+    return {"metadatas": [output]}
 
 @app.get("/api/indexed_files")
 def get_indexed_files():
@@ -425,18 +493,7 @@ def get_indexed_files():
                 continue
 
             seen_paths.add(file_path)
-            ext = Path(file_path).suffix.lower()
-
-            if ext in [".png", ".jpg", ".jpeg"]:
-                category = "image"
-            elif ext == ".pdf":
-                category = "pdf"
-            elif ext in [".txt", ".md"]:
-                category = "text"
-            elif ext in [".docx", ".doc"]:
-                category = "document"
-            else:
-                category = "other"
+            category = get_category_type(file_path)
 
             files.append({
                 "name": meta.get("filename") or Path(file_path).name,
@@ -502,7 +559,7 @@ def ui():
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Local Multimodal Search v2.7</title>
+        <title>Local Multimodal Search v3.4</title>
         <style>
             body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 20px; background: #f4f4f9; }
             .container { max-width: 950px; margin: 0 auto; background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
@@ -516,6 +573,7 @@ def ui():
             
             .badge { display: inline-block; padding: 3px 8px; font-size: 11px; font-weight: bold; border-radius: 4px; color: #fff; background: #007bff; text-transform: uppercase; }
             .badge-image { background: #28a745; }
+            .badge-video { background: #6f42c1; }
             .badge-pdf { background: #dc3545; }
             .badge-text { background: #17a2b8; }
             .badge-document { background: #ffc107; color: #333; }
@@ -523,9 +581,15 @@ def ui():
             .path { font-size: 13px; color: #666; word-break: break-all; margin-top: 4px; }
             .filename { font-size: 16px; color: #007bff; font-weight: 600; text-decoration: underline; }
             
-            .filter-bar { display: flex; gap: 8px; margin-bottom: 15px; align-items: center; }
+            .filter-bar { display: flex; gap: 8px; margin-bottom: 15px; align-items: center; flex-wrap: wrap; }
             .filter-btn { padding: 6px 14px; background: #eee; border: 1px solid #ccc; border-radius: 20px; cursor: pointer; font-size: 13px; }
             .filter-btn.active { background: #007bff; color: #fff; border-color: #007bff; }
+
+            .search-controls { display: flex; gap: 10px; margin-bottom: 15px; align-items: center; flex-wrap: wrap; }
+            .search-input-wrapper { display: flex; gap: 8px; flex: 1; min-width: 280px; }
+            .btn-search { padding: 12px 20px; font-size: 15px; font-weight: bold; background: #007bff; color: white; border: none; border-radius: 6px; cursor: pointer; white-space: nowrap; }
+            .btn-search:hover { background: #0056b3; }
+            .limit-select { padding: 12px 10px; font-size: 14px; border-radius: 6px; border: 1px solid #ccc; background: #fff; }
 
             .cluster-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 15px; margin-top: 15px; }
             .cluster-card { border: 1px solid #ddd; padding: 12px; border-radius: 8px; text-align: center; background: #fafafa; }
@@ -557,7 +621,25 @@ def ui():
             <!-- Tab 1: Search -->
             <div id="search-tab">
                 <h2>Multimodal Search</h2>
-                <input type="text" id="query" placeholder="e.g., '[Person name] at the beach, Me in shorts, [Pet name] at home'..." onkeydown="if(event.key==='Enter') runSearch()">
+                <div class="filter-bar" id="search-category-bar">
+                    <strong>Category:</strong>
+                    <button class="filter-btn active" onclick="setSearchCategory('all', event)">All</button>
+                    <button class="filter-btn" onclick="setSearchCategory('video', event)">Videos</button>
+                    <button class="filter-btn" onclick="setSearchCategory('image', event)">Images</button>
+                    <button class="filter-btn" onclick="setSearchCategory('text', event)">Documents / Text</button>
+                </div>
+                <div class="search-controls">
+                    <div class="search-input-wrapper">
+                        <input type="text" id="query" placeholder="e.g., &quot;a cat on the couch, the clause about sub-leasing, lion in a video&quot;..." onkeydown="if(event.key==='Enter') runSearch()">
+                        <button class="btn-search" onclick="runSearch()">🔍 Search</button>
+                    </div>
+                    <select id="limit-select" class="limit-select" onchange="runSearch()">
+                        <option value="50">Top 50</option>
+                        <option value="100">Top 100</option>
+                        <option value="250">Top 250</option>
+                        <option value="0">All Matches</option>
+                    </select>
+                </div>
                 <div id="results" style="margin-top: 15px;"></div>
             </div>
 
@@ -567,10 +649,9 @@ def ui():
                 <div class="filter-bar">
                     <strong>Filter:</strong>
                     <button class="filter-btn active" onclick="filterFiles('all', event)">All</button>
+                    <button class="filter-btn" onclick="filterFiles('video', event)">Videos</button>
                     <button class="filter-btn" onclick="filterFiles('image', event)">Images</button>
-                    <button class="filter-btn" onclick="filterFiles('pdf', event)">PDFs</button>
-                    <button class="filter-btn" onclick="filterFiles('text', event)">Text / Markdown</button>
-                    <button class="filter-btn" onclick="filterFiles('document', event)">Docs</button>
+                    <button class="filter-btn" onclick="filterFiles('text', event)">Documents / Text</button>
                 </div>
                 <p id="file-status-label">Loading indexed files...</p>
                 <div id="indexed-files-list"></div>
@@ -579,7 +660,7 @@ def ui():
             <!-- Tab 3: Face Tagging Gallery -->
             <div id="tagger-tab" style="display: none;">
                 <h2>Face Clusters & Aliases</h2>
-                <p>Click any thumbnail or photo count to inspect all photos in that cluster. Enter <code>name and/or nicknames</code> (comma-separated) to register search tags.</p>
+                <p>Click any thumbnail or photo count to inspect all photos/videos in that cluster. Enter <code>name and/or nicknames</code> (comma-separated) to register search tags.</p>
                 <div class="cluster-grid" id="cluster-grid"></div>
             </div>
         </div>
@@ -597,6 +678,7 @@ def ui():
         <script>
             let allClusters = [];
             let allIndexedFiles = [];
+            let activeSearchCategory = 'all';
 
             function switchTab(tab, evt) {
                 document.querySelectorAll('.nav-button').forEach(b => b.classList.remove('active'));
@@ -617,15 +699,29 @@ def ui():
                 }
             }
 
+            function setSearchCategory(cat, evt) {
+                document.querySelectorAll('#search-category-bar .filter-btn').forEach(btn => btn.classList.remove('active'));
+                evt.target.classList.add('active');
+                activeSearchCategory = cat;
+                runSearch();
+            }
+
             async function runSearch() {
                 const q = document.getElementById('query').value;
+                const limit = document.getElementById('limit-select').value;
                 if(!q) return;
-                const res = await fetch('/api/search?q=' + encodeURIComponent(q));
+
+                const url = `/api/search?q=${encodeURIComponent(q)}&limit=${limit}&category=${activeSearchCategory}`;
+                const res = await fetch(url);
                 const data = await res.json();
                 let html = '';
                 if(data.metadatas && data.metadatas[0]) {
                     data.metadatas[0].forEach((item) => {
-                        const badgeClass = item.type === 'image' ? 'badge badge-image' : 'badge';
+                        let badgeClass = 'badge';
+                        if (item.type === 'image') badgeClass += ' badge-image';
+                        else if (item.type === 'video') badgeClass += ' badge-video';
+                        else if (item.type === 'text') badgeClass += ' badge-text';
+
                         const fileUrl = '/files/' + encodeURIComponent(item.path);
                         html += `
                             <a class="result-item" href="${fileUrl}" target="_blank">
@@ -635,7 +731,7 @@ def ui():
                             </a>`;
                     });
                 }
-                document.getElementById('results').innerHTML = html || '<p>No matching files or photos found.</p>';
+                document.getElementById('results').innerHTML = html || '<p>No matching files or media found.</p>';
             }
 
             async function loadIndexedFiles() {
@@ -667,9 +763,8 @@ def ui():
                 files.forEach(item => {
                     let badgeClass = 'badge';
                     if (item.category === 'image') badgeClass += ' badge-image';
-                    else if (item.category === 'pdf') badgeClass += ' badge-pdf';
+                    else if (item.category === 'video') badgeClass += ' badge-video';
                     else if (item.category === 'text') badgeClass += ' badge-text';
-                    else if (item.category === 'document') badgeClass += ' badge-document';
 
                     const fileUrl = '/files/' + encodeURIComponent(item.path);
 
@@ -684,7 +779,7 @@ def ui():
             }
 
             function filterFiles(category, evt) {
-                document.querySelectorAll('.filter-bar .filter-btn').forEach(btn => btn.classList.remove('active'));
+                document.querySelectorAll('#files-tab .filter-bar .filter-btn').forEach(btn => btn.classList.remove('active'));
                 evt.target.classList.add('active');
 
                 if (category === 'all') {
@@ -705,7 +800,7 @@ def ui():
                             <div class="crop-container" onclick="openGallery('${c.id}')">
                                 <img src="${c.crop_url}" alt="Face crop">
                             </div>
-                            <div class="photo-count" onclick="openGallery('${c.id}')">${c.photo_count} photo(s) (Inspect)</div>
+                            <div class="photo-count" onclick="openGallery('${c.id}')">${c.photo_count} item(s) (Inspect)</div>
                             <input type="text" id="input-${c.id}" value="${c.aliases}" placeholder="name and/or nicknames">
                             <button onclick="saveTag('${c.id}')">Save Aliases</button>
                         </div>`;
@@ -717,13 +812,18 @@ def ui():
                 const cluster = allClusters.find(c => c.id === clusterId);
                 if (!cluster) return;
                 
-                document.getElementById('modal-title').innerText = `Photos for ${cluster.aliases || cluster.id} (${cluster.photo_count} photos)`;
+                document.getElementById('modal-title').innerText = `Media for ${cluster.aliases || cluster.id} (${cluster.photo_count} items)`;
                 let html = '';
                 cluster.photos.forEach(path => {
                     const fileUrl = '/files/' + encodeURIComponent(path);
-                    html += `<a href="${fileUrl}" target="_blank"><img src="${fileUrl}" title="${path}"></a>`;
+                    const ext = path.split('.').pop().toLowerCase();
+                    if (['mp4', 'mkv', 'mov', 'avi', 'ts'].includes(ext)) {
+                        html += `<a href="${fileUrl}" target="_blank" style="display:flex; align-items:center; justify-content:center; background:#222; color:#fff; border-radius:6px; font-weight:bold; text-decoration:none;">🎬 VIDEO: ${path.split('\\\\').pop()}</a>`;
+                    } else {
+                        html += `<a href="${fileUrl}" target="_blank"><img src="${fileUrl}" title="${path}"></a>`;
+                    }
                 });
-                document.getElementById('modal-gallery').innerHTML = html || '<p>No photos available.</p>';
+                document.getElementById('modal-gallery').innerHTML = html || '<p>No media available.</p>';
                 document.getElementById('gallery-modal').style.display = 'block';
             }
 
