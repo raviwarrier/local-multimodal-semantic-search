@@ -1,3 +1,5 @@
+This project is still under development. It is still buggy and has not been tested for security issues. DO NOT install it yet. This message will be removed once I am fairly convinced that it works as expected and is safe to use.
+
 # Self-Hosted Local Multimodal Semantic Search & Face Tagging Engine
 
 A privacy-first, fully automated local search service built for Windows. Combines face detection/clustering via **InsightFace (ArcFace)** with natural language multimodal embeddings via **Google EmbeddingGemma-2**, persisting vectors in **ChromaDB** and running seamlessly as a persistent Windows Service via **NSSM**.
