@@ -1,4 +1,4 @@
-This project is still under development. It is still buggy and has not been tested for security issues. DO NOT install it yet. This message will be removed once I am fairly convinced that it works as expected and is safe to use.
+### This project is still under development. It is still buggy and has not been tested for security issues. DO NOT install it yet. This message will be removed once I am fairly convinced that it works as expected and is safe to use.
 
 # Self-Hosted Local Multimodal Semantic Search & Face Tagging Engine
 
